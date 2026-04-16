@@ -6,6 +6,7 @@ export const runtime = "nodejs";
 const encoder = new TextEncoder();
 
 export async function GET(request: Request) {
+  console.log("SSE client connected");
   let unsubscribe: (() => void) | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let closed = false;
@@ -29,6 +30,7 @@ export async function GET(request: Request) {
           return;
         }
 
+        console.log("SSE client disconnected");
         closed = true;
         unsubscribe?.();
 
@@ -46,6 +48,7 @@ export async function GET(request: Request) {
       push("retry: 3000\n\n");
 
       unsubscribe = subscribe((message: StreamMessage) => {
+        console.log("SSE EVENT SENT:", message);
         push(`data: ${JSON.stringify(message)}\n\n`);
       });
 
@@ -71,9 +74,9 @@ export async function GET(request: Request) {
 
   return new Response(stream, {
     headers: {
-      "Cache-Control": "no-cache, no-transform",
+      "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "Content-Type": "text/event-stream; charset=utf-8",
+      "Content-Type": "text/event-stream",
     },
   });
 }

@@ -11,6 +11,7 @@ export type EventLog = {
 };
 
 export type EventPayload = {
+  id: string;
   event: EventType;
   user: string;
   flag: string;
@@ -48,9 +49,13 @@ export function getLogs(): EventLog[] {
   return [...store.logs];
 }
 
+export function getLastLog(): EventLog | null {
+  return store.logs[0] ?? null;
+}
+
 export function addLog(payload: EventPayload): EventLog {
   const log: EventLog = {
-    id: crypto.randomUUID(),
+    id: payload.id,
     event: payload.event,
     flag: payload.flag,
     user: payload.user,
