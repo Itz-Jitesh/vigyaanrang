@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "CTF Event Dashboard",
-  description: "Real-time CTF event dashboard with in-memory log storage.",
+  description: "Real-time CTF event dashboard with MongoDB-backed log storage.",
 };
 
 export default function RootLayout({

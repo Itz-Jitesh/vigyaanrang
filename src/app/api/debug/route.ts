@@ -7,12 +7,13 @@ export const runtime = "nodejs";
 
 export async function GET() {
   try {
-    const logs = getLogs();
+    const logs = await getLogs();
+    const lastLog = await getLastLog();
 
     return NextResponse.json(
       {
         totalLogs: logs.length,
-        lastLog: getLastLog(),
+        lastLog,
         serverTime: new Date().toISOString(),
       },
       { status: 200 },

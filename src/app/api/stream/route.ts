@@ -1,4 +1,5 @@
-import { subscribe, type StreamMessage } from "@/lib/store";
+import type { StreamMessage } from "@/lib/events";
+import { subscribe } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";

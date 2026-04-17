@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { addLog, clearLogs, getLogs, type EventPayload, type EventType } from "@/lib/store";
+import type { EventPayload, EventType } from "@/lib/events";
+import { addLog, clearLogs, getLogs } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -9,7 +10,8 @@ const EVENT_TYPES: EventType[] = ["flag_captured"];
 
 export async function GET() {
   try {
-    return NextResponse.json({ success: true, logs: getLogs() }, { status: 200 });
+    const logs = await getLogs();
+    return NextResponse.json({ success: true, logs }, { status: 200 });
   } catch (error) {
     console.error("GET /api/events failed:", error);
     return NextResponse.json(
@@ -44,7 +46,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const log = addLog(validation.data);
+    const log = await addLog(validation.data);
 
     return NextResponse.json({ success: true, log }, { status: 200 });
   } catch (error) {
@@ -58,7 +60,7 @@ export async function POST(request: Request) {
 
 export async function DELETE() {
   try {
-    clearLogs();
+    await clearLogs();
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (error) {
     console.error("DELETE /api/events failed:", error);

@@ -2,10 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { EventLog, StreamMessage } from "@/lib/store";
+import type { EventLog, StreamMessage } from "@/lib/events";
 
 type ConnectionStatus = "connected" | "disconnected";
 type ConnectionMode = "sse" | "polling";
+type Toast = {
+  id: string;
+  message: string;
+};
 
 type EventsResponse = {
   success: boolean;
@@ -31,6 +35,7 @@ const ENABLE_SSE = true;
 
 export default function Home() {
   const [logs, setLogs] = useState<EventLog[]>([]);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isClearing, setIsClearing] = useState(false);
   const [isTestingApi, setIsTestingApi] = useState(false);
@@ -40,9 +45,11 @@ export default function Home() {
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("sse");
   const [lastReceivedEvent, setLastReceivedEvent] = useState<string>("No events yet");
   const listRef = useRef<HTMLDivElement>(null);
-  const hasLoadedRef = useRef(false);
+  const hasInitializedNotificationsRef = useRef(false);
+  const previousLogsCountRef = useRef(0);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const toastTimeoutsRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const totalFlagsCaptured = logs.length;
   const userCaptureCounts = getUserCaptureCounts(logs);
 
@@ -53,6 +60,83 @@ export default function Home() {
     const latestLog = logs[0];
     setLastReceivedEvent(latestLog ? formatEventSummary(latestLog) : "No events yet");
   }, [logs]);
+
+  const dismissToast = useCallback((toastId: string) => {
+    const timeout = toastTimeoutsRef.current.get(toastId);
+
+    if (timeout) {
+      clearTimeout(timeout);
+      toastTimeoutsRef.current.delete(toastId);
+    }
+
+    setToasts((currentToasts) => currentToasts.filter((toast) => toast.id !== toastId));
+  }, []);
+
+  const playNotificationSound = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const audio = new Audio("/beep.wav");
+    audio.preload = "auto";
+    audio.currentTime = 0;
+    void audio.play().catch(() => undefined);
+  }, []);
+
+  const showToast = useCallback(
+    (log: EventLog) => {
+      const toastId =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${log.id}-${Date.now()}`;
+
+      setToasts((currentToasts) => [
+        ...currentToasts,
+        { id: toastId, message: `User ${log.user} captured flag ${log.flag}` },
+      ]);
+
+      const timeout = setTimeout(() => {
+        dismissToast(toastId);
+      }, 3500);
+
+      toastTimeoutsRef.current.set(toastId, timeout);
+    },
+    [dismissToast],
+  );
+
+  useEffect(() => {
+    if (!hasInitializedNotificationsRef.current) {
+      hasInitializedNotificationsRef.current = true;
+      previousLogsCountRef.current = logs.length;
+      return;
+    }
+
+    const previousCount = previousLogsCountRef.current;
+    const currentCount = logs.length;
+
+    if (currentCount > previousCount) {
+      const newLogs = logs.slice(0, currentCount - previousCount).reverse();
+
+      for (const log of newLogs) {
+        showToast(log);
+        playNotificationSound();
+      }
+    }
+
+    previousLogsCountRef.current = currentCount;
+  }, [logs, playNotificationSound, showToast]);
+
+  useEffect(() => {
+    const toastTimeouts = toastTimeoutsRef.current;
+
+    return () => {
+      for (const timeout of toastTimeouts.values()) {
+        clearTimeout(timeout);
+      }
+
+      toastTimeouts.clear();
+    };
+  }, []);
   
   useEffect(() => {
     const container = listRef.current;
@@ -63,10 +147,8 @@ export default function Home() {
     
     container.scrollTo({
       top: 0,
-      behavior: hasLoadedRef.current ? "smooth" : "auto",
+      behavior: "smooth",
     });
-    
-    hasLoadedRef.current = true;
   }, [logs]);
   
   const apiFetch = useCallback(
@@ -100,10 +182,14 @@ export default function Home() {
       }
 
       try {
+        console.log("Fetching logs...");
         const data = await apiFetch<EventsResponse>("/api/events", { cache: "no-store" });
-        const newLogs = Array.isArray(data.logs) ? [...data.logs] : [];
-        console.log("SETTING LOGS:", newLogs);
-        setLogs(newLogs);
+        const serverLogs = Array.isArray(data.logs) ? [...data.logs] : [];
+        setLogs((currentLogs) => {
+          const nextLogs = reconcileLogs(serverLogs, currentLogs);
+          console.log("SETTING LOGS:", nextLogs);
+          return nextLogs;
+        });
         setError(null);
         setConnectionStatus("connected");
       } catch (fetchError) {
@@ -124,17 +210,15 @@ export default function Home() {
       return;
     }
 
-    const previousLogs = logs;
     setIsClearing(true);
-    console.log("SETTING LOGS:", []);
-    setLogs([]);
     setError(null);
 
     try {
       await apiFetch<EventsResponse>("/api/events", { method: "DELETE" });
+      console.log("SETTING LOGS:", []);
+      setLogs([]);
       setLastApiError(null);
     } catch (fetchError) {
-      setLogs(previousLogs);
       const message = getErrorMessage(fetchError, "Unable to clear logs.");
       setError(message);
     } finally {
@@ -165,11 +249,10 @@ export default function Home() {
 
       if (data.log) {
         setLogs((currentLogs) => {
-          const newLogs = mergeLogs([data.log as EventLog], currentLogs);
-          console.log("SETTING LOGS:", newLogs);
-          return [...newLogs];
+          const nextLogs = appendLogs(currentLogs, [data.log as EventLog]);
+          console.log("SETTING LOGS:", nextLogs);
+          return nextLogs;
         });
-        setLastReceivedEvent(formatEventSummary(data.log));
       } else {
         await fetchLogs(false);
       }
@@ -191,22 +274,20 @@ export default function Home() {
   }, []);
 
   const startPolling = useCallback(() => {
-    setConnectionMode("polling");
-    setConnectionStatus("connected");
-
     if (pollingRef.current) {
       return;
     }
 
-    void fetchLogs(false);
+    setConnectionMode("polling");
     pollingRef.current = setInterval(() => {
       console.log("Polling fetch triggered");
       void fetchLogs(false);
-    }, 2000);
+    }, 5000);
   }, [fetchLogs]);
   
   const startEventStream = useCallback(() => {
     if (!ENABLE_SSE || typeof window === "undefined") {
+      startPolling();
       return;
     }
 
@@ -220,9 +301,9 @@ export default function Home() {
 
     eventSource.onopen = () => {
       console.log("SSE connected");
+      stopPolling();
       setConnectionMode("sse");
       setConnectionStatus("connected");
-      void fetchLogs(false);
     };
 
     eventSource.onmessage = (event) => {
@@ -240,9 +321,9 @@ export default function Home() {
         
         setConnectionStatus("connected");
         setLogs((currentLogs) => {
-          const newLogs = mergeLogs([message.payload], currentLogs);
-          console.log("SETTING LOGS:", newLogs);
-          return [...newLogs];
+          const nextLogs = appendLogs(currentLogs, [message.payload]);
+          console.log("SETTING LOGS:", nextLogs);
+          return nextLogs;
         });
         setLastReceivedEvent(formatEventSummary(message.payload));
       } catch (streamError) {
@@ -253,24 +334,22 @@ export default function Home() {
     eventSource.onerror = () => {
       console.log("SSE error");
       setConnectionStatus("disconnected");
-      setConnectionMode("polling");
       eventSource.close();
+      eventSourceRef.current = null;
+      startPolling();
     };
-  }, [fetchLogs]);
+  }, [startPolling, stopPolling]);
 
   
   useEffect(() => {
     void fetchLogs();
-    startPolling();
-    if (ENABLE_SSE) {
-      startEventStream();
-    }
+    startEventStream();
 
     return () => {
       eventSourceRef.current?.close();
       stopPolling();
     };
-  }, [fetchLogs, startEventStream, startPolling, stopPolling]);
+  }, [fetchLogs, startEventStream, stopPolling]);
 
 
   return (
@@ -295,7 +374,7 @@ export default function Home() {
                 </h1>
                 <p className="max-w-2xl text-sm text-slate-300 sm:text-base">
                   Live flag submission events streamed over SSE with automatic polling fallback and
-                  stored in memory until the server restarts.
+                  persisted in MongoDB.
                 </p>
               </div>
             </div>
@@ -322,7 +401,7 @@ export default function Home() {
 
           <div className="grid gap-4 border-b border-white/10 px-6 py-4 text-sm text-slate-300 sm:grid-cols-2 xl:grid-cols-4">
             <StatCard label="Captured Flags" value={String(totalFlagsCaptured)} />
-            <StatCard label="Retention" value="200 max" />
+            <StatCard label="Retention" value="All logs" />
             <StatCard label="Transport" value={getModeLabel(connectionMode)} />
             <StatCard
               label="Most Active User"
@@ -363,7 +442,7 @@ export default function Home() {
                 ) : (
                   <ul className="divide-y divide-white/6">
                     {logs.map((log: EventLog) => (
-                      <LogItem key={log.id} log={log} />
+                      <LogItem key={log._id || log.id} log={log} />
                     ))}
                   </ul>
                 )}
@@ -408,6 +487,32 @@ export default function Home() {
             </div>
           ) : null}
         </section>
+      </div>
+
+      <div className="pointer-events-none fixed right-4 top-4 z-50 flex w-full max-w-sm flex-col gap-3 sm:right-6 sm:top-6">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className="pointer-events-auto overflow-hidden rounded-2xl border border-amber-400/20 bg-slate-950/95 shadow-xl shadow-slate-950/40 backdrop-blur"
+          >
+            <div className="flex items-start gap-3 px-4 py-3">
+              <div className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-300" />
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-200">
+                  New Capture
+                </div>
+                <p className="mt-1 text-sm text-slate-100">{toast.message}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => dismissToast(toast.id)}
+                className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-xs text-slate-300 transition hover:bg-white/[0.08]"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
     </main>
   );
@@ -478,7 +583,7 @@ function LogItem({ log }: { log: EventLog }) {
   const hasMissingFields = isLogMissingFields(log);
 
   return (
-    <li className="flex flex-col gap-3 px-5 py-4 transition duration-200 hover:bg-white/[0.03] md:flex-row md:items-start md:justify-between">
+    <li className="flex flex-col gap-3 px-5 py-4 transition-all duration-300 ease-in-out hover:bg-white/[0.03] md:flex-row md:items-start md:justify-between">
       <div className="flex min-w-0 gap-3">
         <CaptureIcon />
         <div className="space-y-2">
@@ -517,20 +622,79 @@ function LogItem({ log }: { log: EventLog }) {
   );
 }
 
-function mergeLogs(incomingLogs: EventLog[], currentLogs: EventLog[]) {
-  const map = new Map<string, EventLog>();
+function appendLogs(currentLogs: EventLog[], incomingLogs: EventLog[]) {
+  const currentMap = new Map(currentLogs.map((log) => [getLogKey(log), log]));
+  const prependedLogs: EventLog[] = [];
 
   for (const log of incomingLogs) {
-    map.set(log.id, log);
-  }
+    const key = getLogKey(log);
 
-  for (const log of currentLogs) {
-    if (!map.has(log.id)) {
-      map.set(log.id, log);
+    if (currentMap.has(key)) {
+      continue;
     }
+
+    currentMap.set(key, log);
+    prependedLogs.push(log);
   }
 
-  return Array.from(map.values()).slice(0, 200);
+  if (prependedLogs.length === 0) {
+    return currentLogs;
+  }
+
+  return sortLogs([...prependedLogs, ...currentLogs]);
+}
+
+function reconcileLogs(serverLogs: EventLog[], currentLogs: EventLog[]) {
+  if (serverLogs.length === 0) {
+    return [];
+  }
+
+  const currentMap = new Map(currentLogs.map((log) => [getLogKey(log), log]));
+  const nextLogs = serverLogs.map((log) => {
+    const currentLog = currentMap.get(getLogKey(log));
+
+    if (!currentLog) {
+      return log;
+    }
+
+    return areLogsEqual(currentLog, log) ? currentLog : log;
+  });
+
+  if (
+    nextLogs.length === currentLogs.length &&
+    nextLogs.every((log, index) => log === currentLogs[index])
+  ) {
+    return currentLogs;
+  }
+
+  return sortLogs(nextLogs);
+}
+
+function sortLogs(logs: EventLog[]) {
+  return [...logs].sort((left, right) => {
+    const timestampDelta = Date.parse(right.timestamp) - Date.parse(left.timestamp);
+
+    if (!Number.isNaN(timestampDelta) && timestampDelta !== 0) {
+      return timestampDelta;
+    }
+
+    return getLogKey(right).localeCompare(getLogKey(left));
+  });
+}
+
+function getLogKey(log: Pick<EventLog, "_id" | "id">) {
+  return log._id || log.id;
+}
+
+function areLogsEqual(left: EventLog, right: EventLog) {
+  return (
+    left._id === right._id &&
+    left.id === right.id &&
+    left.event === right.event &&
+    left.user === right.user &&
+    left.flag === right.flag &&
+    left.timestamp === right.timestamp
+  );
 }
 
 function getUserCaptureCounts(logs: EventLog[]) {
