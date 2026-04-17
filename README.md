@@ -1,31 +1,83 @@
-# Real-time CTF Event Dashboard (n8n Webhooks)
+# Vidyarang
 
-Next.js (App Router) dashboard that receives webhook events from **n8n**, stores them **in-memory** (max **200**, newest-first), and updates the UI automatically using:
+A Next.js 16 dashboard for monitoring CTF flag capture events in real time. The app accepts webhook payloads, stores them in MongoDB, streams new events over SSE, and falls back to polling in the browser when the live stream drops.
 
-- **SSE (Server-Sent Events)** when available
-- **Polling fallback (every 2 seconds)** for tunnel environments (Cloudflare / ngrok) where SSE can be unreliable
+## Event dashboard
 
-## Quick start
+This project was used as a live dashboard for an event setup. It ties together event activity coming from the core flagging workflow, automation, and webhook delivery into a single real-time view for operators.
+
+## Ownership
+
+- `Me(@Itz-Jitesh)` handled the n8n + dashboard part
+- `Benjamin(@bchbenjamin)` handled the core Ubuntu flagging part
+- `C Yogeetha(@gitGojo)` handled the Discord webhook part
+
+## Stack
+
+- Next.js 16 App Router
+- React 19
+- TypeScript
+- Tailwind CSS 4
+- MongoDB Node.js driver
+
+## Current behavior
+
+- Receives flag capture events at `POST /api/events`
+- Persists logs in MongoDB collection `logs`
+- Streams new inserts to connected clients through `GET /api/stream`
+- Falls back to polling `GET /api/events` every 5 seconds if SSE disconnects
+- Shows a live event feed, per-user capture totals, connection state, debug cards, toast alerts, and a notification sound
+- Supports clearing all stored logs from the UI or via `DELETE /api/events`
+
+## Getting started
+
+1. Install dependencies:
 
 ```bash
 npm install
+```
+
+2. Add a MongoDB connection string in `.env.local` or `.env`:
+
+```env
+MONGODB_URI=mongodb+srv://<username>:<password>@<cluster>/<database>
+```
+
+3. Start the dev server:
+
+```bash
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+4. Open [http://localhost:3000](http://localhost:3000)
 
-## Webhook payload format (MUST MATCH)
+## Available scripts
 
-The app accepts either:
+```bash
+npm run dev
+npm run build
+npm run start
+npm run lint
+```
 
-- **Array of objects** (n8n typical):
+## Webhook payload format
+
+The API accepts either an array payload or a single object payload. In both cases the route reads `log` and validates these fields:
+
+- `id`: non-empty string
+- `event`: must be `flag_captured`
+- `flag`: non-empty string
+- `user`: non-empty string
+- `timestamp`: valid date string
+
+Array form:
 
 ```json
 [
   {
     "success": true,
     "log": {
-      "id": "uuid",
+      "id": "demo-webhook-event",
       "event": "flag_captured",
       "flag": "45",
       "user": "123",
@@ -35,13 +87,13 @@ The app accepts either:
 ]
 ```
 
-- **Single object**:
+Object form:
 
 ```json
 {
   "success": true,
   "log": {
-    "id": "uuid",
+    "id": "demo-webhook-event",
     "event": "flag_captured",
     "flag": "45",
     "user": "123",
@@ -49,16 +101,6 @@ The app accepts either:
   }
 }
 ```
-
-### Validation rules
-
-The server extracts `body[0].log` (array) or `body.log` (object) and requires:
-
-- `id` (string)
-- `event` (string, must be `flag_captured`)
-- `flag` (string)
-- `user` (string)
-- `timestamp` (string, must parse as a valid date)
 
 Invalid requests return:
 
@@ -68,29 +110,49 @@ Invalid requests return:
 
 ## API routes
 
-### `POST /api/events`
-
-Receives webhook events and stores them in the global in-memory store.
-
-- **Success**: `200` → `{ success: true, log }`
-- **Invalid payload**: `400` → `{ success: false, error: "Invalid payload" }`
-- **Server error**: `500` → `{ success: false, error: "Internal server error" }`
-
-Server logs:
-
-- `EVENT RECEIVED: <payload>`
-
 ### `GET /api/events`
 
-Returns all logs (newest first):
+Returns all logs sorted newest first:
 
 ```json
-{ "success": true, "logs": [ ... ] }
+{
+  "success": true,
+  "logs": [
+    {
+      "_id": "6800f3d6a0f5f2d8d91e3c1a",
+      "id": "demo-webhook-event",
+      "event": "flag_captured",
+      "flag": "45",
+      "user": "123",
+      "timestamp": "2026-04-16T13:40:00Z"
+    }
+  ]
+}
+```
+
+### `POST /api/events`
+
+Validates the payload, inserts it into MongoDB, and returns the stored log including the generated MongoDB `_id`.
+
+Success response:
+
+```json
+{
+  "success": true,
+  "log": {
+    "_id": "6800f3d6a0f5f2d8d91e3c1a",
+    "id": "demo-webhook-event",
+    "event": "flag_captured",
+    "flag": "45",
+    "user": "123",
+    "timestamp": "2026-04-16T13:40:00Z"
+  }
+}
 ```
 
 ### `DELETE /api/events`
 
-Clears all logs:
+Deletes all stored logs:
 
 ```json
 { "success": true }
@@ -98,102 +160,98 @@ Clears all logs:
 
 ### `GET /api/stream`
 
-SSE endpoint that streams realtime events to the UI.
+SSE endpoint used by the dashboard for live updates.
 
-Headers:
+- Sends event messages as `data: {...}`
+- Sends `clear` messages after log deletion
+- Sends keepalive comments every 15 seconds
+- Sets `retry: 3000` for client reconnect behavior
 
-- `Content-Type: text/event-stream`
-- `Cache-Control: no-cache`
-- `Connection: keep-alive`
+Message examples:
 
-Server logs:
+```json
+{ "type": "event", "payload": { "...": "..." } }
+```
 
-- `SSE client connected`
-- `SSE EVENT SENT: <payload>`
-- `SSE client disconnected`
+```json
+{ "type": "clear" }
+```
 
 ### `GET /api/debug`
 
-Returns a quick snapshot of server state:
+Returns a lightweight snapshot of server state:
 
 ```json
 {
   "totalLogs": 12,
-  "lastLog": { "...": "..." },
-  "serverTime": "2026-04-16T14:15:34.789Z"
+  "lastLog": {
+    "_id": "6800f3d6a0f5f2d8d91e3c1a",
+    "id": "demo-webhook-event",
+    "event": "flag_captured",
+    "flag": "45",
+    "user": "123",
+    "timestamp": "2026-04-16T13:40:00Z"
+  },
+  "serverTime": "2026-04-17T16:30:00.000Z"
 }
 ```
 
-## Dashboard behavior (real-time updates)
+## UI features
 
-The UI is designed to update without refresh.
+- `Test API` button posts a sample event to `POST /api/events`
+- `Clear Logs` button deletes all logs
+- Toast notifications appear for newly received events
+- `/public/beep.wav` is played when a new event arrives
+- The dashboard tracks:
+  - total captured flags
+  - connection status
+  - active transport mode
+  - most active user
+  - last received event
+  - last API error
 
-- **Polling is always running** every 2 seconds to keep the UI updated even if SSE breaks behind a tunnel.
-- **SSE is attempted** as a best-effort enhancement.
-- If SSE errors, the UI continues to update via polling.
+## MongoDB notes
 
-In the browser console you’ll see debug output:
+- The app requires `MONGODB_URI`
+- It creates or reuses the `logs` collection automatically
+- Logs are stored permanently in MongoDB until deleted; there is no in-app retention cap
+- MongoDB connections are cached globally to avoid reconnecting on every request
 
-- `RENDER: <logs.length>`
-- `API CALL: <url> <body>`
-- `Polling fetch triggered`
-- `SSE connecting...`
-- `SSE connected`
-- `SSE message: <data>`
-- `SSE error`
-- `SETTING LOGS: <newLogs>`
+## Manual testing
 
-The dashboard includes a visible debug panel showing:
-
-- logs count
-- last received event
-- connection status (`connected` / `disconnected`)
-- connection mode (`Live (SSE)` / `Polling mode`)
-- last API error
-
-## Manual testing (copy/paste)
-
-### Send a valid event (array payload)
+Send a valid event:
 
 ```bash
 curl -s -X POST http://localhost:3000/api/events \
   -H "Content-Type: application/json" \
-  --data '[{"success":true,"log":{"id":"uuid","event":"flag_captured","flag":"45","user":"123","timestamp":"2026-04-16T13:40:00Z"}}]'
+  --data '[{"success":true,"log":{"id":"demo-webhook-event","event":"flag_captured","flag":"45","user":"123","timestamp":"2026-04-16T13:40:00Z"}}]'
 ```
 
-### Send an invalid event
+Fetch logs:
 
 ```bash
-curl -s -X POST http://localhost:3000/api/events \
-  -H "Content-Type: application/json" \
-  --data '[{"success":true,"log":{"id":"broken"}}]'
+curl -s http://localhost:3000/api/events
 ```
 
-### Clear logs
+Clear logs:
 
 ```bash
 curl -s -X DELETE http://localhost:3000/api/events
 ```
 
-### Watch SSE output locally
+Watch the SSE stream:
 
 ```bash
 curl -N http://localhost:3000/api/stream
 ```
 
-## Tunnels (Cloudflare / ngrok)
+## Project structure
 
-SSE can be disrupted by some proxies (buffering, idle timeouts, HTTP/2 quirks).
-This app is designed to remain usable in those environments by keeping **polling enabled** at all times.
-
-If you want to disable SSE entirely and run purely in “failsafe” polling mode, set:
-
-- `ENABLE_SSE = false` in `src/app/page.tsx`
-
-## Project layout
-
-- `src/app/page.tsx`: dashboard UI + debug panel + SSE + polling
-- `src/app/api/events/route.ts`: validated webhook ingestion + in-memory storage
-- `src/app/api/stream/route.ts`: SSE stream
-- `src/app/api/debug/route.ts`: server debug snapshot
-- `src/lib/store.ts`: global in-memory log store (max 200, newest-first)
+- `src/app/page.tsx`: dashboard UI, SSE client, polling fallback, toast notifications
+- `src/app/api/events/route.ts`: log ingestion, listing, and clearing
+- `src/app/api/stream/route.ts`: SSE stream endpoint
+- `src/app/api/debug/route.ts`: debug snapshot endpoint
+- `src/lib/store.ts`: MongoDB-backed log store and event subscriptions
+- `src/lib/mongodb.ts`: MongoDB connection and collection setup
+- `src/lib/events.ts`: shared event and stream types
+- `public/beep.wav`: notification sound used by the dashboard
